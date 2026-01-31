@@ -1,8 +1,10 @@
 # Rental Price Predictor (Ypsilanti, MI)
+<img width="934" height="798" alt="image" src="https://github.com/user-attachments/assets/165cfc12-a48c-4a2a-b58d-eea3328baefc" />
 
 A local rent estimate for Ypsilanti. It pulls real listings from RentCast,
 clusters them into neighborhoods, trains a CatBoost model, and serves predictions
 via a Flask API + simple web UI.
+<img width="641" height="690" alt="image" src="https://github.com/user-attachments/assets/1cc565f0-58e9-4eee-b99f-e4430748a7c2" />
 
 ## Highlights
 
