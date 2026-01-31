@@ -1,6 +1,6 @@
 # Rental Price Predictor (Ypsilanti, MI)
 
-A local rent "Zestimate" for Ypsilanti. It pulls real listings from RentCast,
+A local rent estimate for Ypsilanti. It pulls real listings from RentCast,
 clusters them into neighborhoods, trains a CatBoost model, and serves predictions
 via a Flask API + simple web UI.
 
