@@ -1,0 +1,38 @@
+# Environment variables (contains API keys)
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+.venv/
+
+# CatBoost training artifacts
+catboost_info/
+
+# Raw data pulls (keep processed data + trained models)
+data/**/raw/
+data/**/rentals_raw_*.csv
+rentals_raw_*.csv
+rentals_rentcast.csv
+rentals_ypsilanti.csv
+
+# Backups (models themselves are tracked)
+backups/
+models/**/backups/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

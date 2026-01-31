@@ -1,0 +1,7 @@
+playwright
+pandas
+playwright-stealth==1.0.6
+requests
+flask
+catboost
+gunicorn

@@ -1,0 +1,58 @@
+{
+  "feature_names": [
+    "Beds",
+    "Baths",
+    "SqFt",
+    "Property Type",
+    "Cluster_ID"
+  ],
+  "categorical_features": [
+    "Property Type",
+    "Cluster_ID"
+  ],
+  "model_type": "CatBoostRegressor",
+  "model_file": "rental_price_model.cbm",
+  "cluster_centroids": {
+    "2": {
+      "latitude": 42.210411119999996,
+      "longitude": -83.58110792,
+      "count": 10
+    },
+    "7": {
+      "latitude": 42.24892856842104,
+      "longitude": -83.57434768421052,
+      "count": 19
+    },
+    "0": {
+      "latitude": 42.242932776785715,
+      "longitude": -83.61991442857142,
+      "count": 112
+    },
+    "3": {
+      "latitude": 42.19926475,
+      "longitude": -83.67972012499999,
+      "count": 8
+    },
+    "1": {
+      "latitude": 42.2489755,
+      "longitude": -83.6548591875,
+      "count": 16
+    },
+    "5": {
+      "latitude": 42.24260396774194,
+      "longitude": -83.60047625806455,
+      "count": 31
+    },
+    "4": {
+      "latitude": 42.25739057199999,
+      "longitude": -83.6216168,
+      "count": 25
+    },
+    "6": {
+      "latitude": 42.321145,
+      "longitude": -83.607473,
+      "count": 1
+    }
+  },
+  "cv_rmse": 212.90818437019863
+}

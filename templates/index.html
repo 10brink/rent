@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rental Price Predictor</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Space+Grotesk:wght@400;500;600&display=swap');
+
+        :root {
+            --ink: #1f2a2a;
+            --muted: #445257;
+            --accent: #0f766e;
+            --accent-dark: #0b5b55;
+            --panel: rgba(255, 255, 255, 0.88);
+            --panel-strong: rgba(255, 255, 255, 0.96);
+            --shadow: 0 24px 70px rgba(12, 30, 32, 0.28);
+            --border: rgba(15, 118, 110, 0.2);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Space Grotesk', sans-serif;
+            margin: 0;
+            min-height: 100vh;
+            padding: 48px 20px 64px;
+            background: url('/static/ypsi.webp') 80% center / auto 100% repeat-x fixed;
+            color: var(--ink);
+            position: relative;
+        }
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            background:
+                linear-gradient(135deg, rgba(250, 244, 233, 0.6), rgba(215, 237, 232, 0.35)),
+                linear-gradient(180deg, rgba(12, 30, 32, 0.25), rgba(12, 30, 32, 0.1));
+            pointer-events: none;
+            z-index: 0;
+        }
+        h1 {
+            font-family: 'Fraunces', serif;
+            color: #14201f;
+            text-align: center;
+            font-size: clamp(2rem, 2.4vw + 1.6rem, 3rem);
+            margin: 0 0 20px;
+            letter-spacing: 0.5px;
+        }
+        .page-wrap {
+            max-width: 720px;
+            margin: 0 auto;
+            position: relative;
+            z-index: 1;
+        }
+        .form-container {
+            background: var(--panel);
+            padding: 32px;
+            border-radius: 18px;
+            box-shadow: var(--shadow);
+            border: 1px solid var(--border);
+            backdrop-filter: blur(10px);
+            animation: liftIn 0.6s ease-out both;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            color: var(--muted);
+        }
+        input, select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid rgba(31, 42, 42, 0.15);
+            border-radius: 10px;
+            font-size: 16px;
+            background: var(--panel-strong);
+        }
+        input:focus, select:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.15);
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background: var(--accent);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background 0.2s;
+            font-weight: 600;
+        }
+        button:hover {
+            background: var(--accent-dark);
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 20px;
+            background: rgba(232, 245, 233, 0.9);
+            border-radius: 12px;
+            display: none;
+        }
+        .result.loading {
+            display: block;
+            background: rgba(255, 255, 255, 0.85);
+            border: 1px solid rgba(15, 118, 110, 0.12);
+        }
+        .result.show {
+            display: block;
+        }
+        .result.error {
+            background: rgba(255, 235, 238, 0.95);
+        }
+        .skeleton {
+            animation: shimmer 1.2s infinite linear;
+            background: linear-gradient(
+                90deg,
+                rgba(220, 228, 226, 0.55) 0%,
+                rgba(240, 244, 243, 0.95) 50%,
+                rgba(220, 228, 226, 0.55) 100%
+            );
+            background-size: 200% 100%;
+            border-radius: 8px;
+        }
+        .skeleton-line {
+            height: 16px;
+            margin: 10px 0;
+        }
+        .skeleton-title {
+            height: 30px;
+            margin-bottom: 12px;
+        }
+        .skeleton-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 8px 12px;
+        }
+        @keyframes shimmer {
+            0% { background-position: 0% 0; }
+            100% { background-position: -200% 0; }
+        }
+        .price-main {
+            font-size: 32px;
+            font-weight: bold;
+            color: #0f5f2f;
+            text-align: center;
+        }
+        .price-range {
+            text-align: center;
+            color: #47615b;
+            margin-top: 5px;
+        }
+        .details {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(15, 118, 110, 0.25);
+            font-size: 14px;
+            color: #39514c;
+        }
+        .context-card {
+            margin-top: 12px;
+            padding: 12px 14px;
+            background: rgba(255, 255, 255, 0.85);
+            border-radius: 10px;
+            border: 1px solid rgba(15, 118, 110, 0.18);
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 8px 12px;
+            font-size: 13px;
+            color: #314644;
+        }
+        .context-card strong {
+            display: block;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: #5a6a66;
+            margin-bottom: 2px;
+        }
+        .error-message {
+            color: #c62828;
+            text-align: center;
+        }
+        .loading {
+            text-align: center;
+            color: #4a5a57;
+        }
+        .comps {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(15, 118, 110, 0.25);
+        }
+        .comps-list {
+            list-style: none;
+            padding: 0;
+            margin: 10px 0 0 0;
+        }
+        .comps-list li {
+            padding: 10px;
+            margin: 5px 0;
+            background: rgba(255, 255, 255, 0.75);
+            border-radius: 10px;
+            display: grid;
+            grid-template-columns: 80px 1fr;
+            grid-template-rows: auto auto;
+            gap: 2px 10px;
+            align-items: center;
+        }
+        .comp-price {
+            font-weight: bold;
+            color: #0f5f2f;
+            font-size: 16px;
+            grid-row: span 2;
+        }
+        .comp-details {
+            font-size: 13px;
+            color: #1f2a2a;
+        }
+        .comp-address {
+            font-size: 12px;
+            color: #52625e;
+        }
+        .comp-distance {
+            font-size: 11px;
+            color: #73807d;
+            grid-column: 2;
+        }
+        @keyframes liftIn {
+            from {
+                opacity: 0;
+                transform: translateY(16px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        @media (max-width: 600px) {
+            body {
+                padding: 32px 16px 48px;
+                background-position: 70% top;
+                background-size: 180% auto;
+                background-attachment: scroll;
+            }
+            .form-container {
+                padding: 24px;
+            }
+        }
+        @media (min-width: 1100px) {
+            body {
+                background-position: 95% center;
+            }
+            .page-wrap {
+                max-width: 620px;
+                margin-left: clamp(24px, 8vw, 140px);
+                margin-right: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="page-wrap">
+    <h1>Rental Price Predictor — Ypsilanti, MI</h1>
+
+        <div class="form-container">
+        <form id="prediction-form">
+            <div class="form-group">
+                <label for="address">Address</label>
+                <input type="text" id="address" name="address"
+                       value="957 Sheridan St, Ypsilanti, MI 48197" required>
+            </div>
+
+            <div class="form-group">
+                <label for="sqft">Square Feet</label>
+                <input type="number" id="sqft" name="sqft"
+                       value="430" min="100" max="10000" required>
+            </div>
+
+            <div class="form-group">
+                <label for="beds">Bedrooms</label>
+                <select id="beds" name="beds" required>
+                    <option value="">Select...</option>
+                    <option value="1" selected>1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                    <option value="5">5+</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="baths">Bathrooms</label>
+                <select id="baths" name="baths" required>
+                    <option value="">Select...</option>
+                    <option value="1" selected>1</option>
+                    <option value="1.5">1.5</option>
+                    <option value="2">2</option>
+                    <option value="2.5">2.5</option>
+                    <option value="3">3+</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="property_type">Property Type</label>
+                <select id="property_type" name="property_type" required>
+                    <option value="">Select...</option>
+                    <option value="Apartment" selected>Apartment</option>
+                    <option value="Condo">Condo</option>
+                    <option value="Single Family">Single Family</option>
+                    <option value="Multi-Family">Multi-Family</option>
+                </select>
+            </div>
+
+            <button type="submit" id="submit-btn">Predict Price</button>
+        </form>
+
+            <div id="result" class="result">
+                <div id="result-content"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('prediction-form');
+        const resultDiv = document.getElementById('result');
+        const resultContent = document.getElementById('result-content');
+        const submitBtn = document.getElementById('submit-btn');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            // Show loading state
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Predicting...';
+            resultDiv.classList.remove('show', 'error');
+            resultDiv.classList.add('loading');
+            resultContent.innerHTML = `
+                <div class="skeleton skeleton-title"></div>
+                <div class="skeleton skeleton-line" style="width: 70%;"></div>
+                <div class="skeleton-grid">
+                    <div class="skeleton skeleton-line"></div>
+                    <div class="skeleton skeleton-line"></div>
+                    <div class="skeleton skeleton-line"></div>
+                </div>
+                <div class="skeleton skeleton-line" style="width: 85%; margin-top: 16px;"></div>
+                <div class="skeleton skeleton-line" style="width: 65%;"></div>
+            `;
+            resultDiv.classList.add('show');
+
+            const formData = {
+                address: document.getElementById('address').value,
+                sqft: parseInt(document.getElementById('sqft').value),
+                beds: parseInt(document.getElementById('beds').value),
+                baths: parseFloat(document.getElementById('baths').value),
+                property_type: document.getElementById('property_type').value
+            };
+
+            try {
+                const response = await fetch('/api/predict', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(formData)
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    let compsHtml = '';
+                    if (data.comparable_properties && data.comparable_properties.length > 0) {
+                        compsHtml = `
+                            <div class="comps">
+                                <strong>Comparable Properties:</strong>
+                                <ul class="comps-list">
+                                    ${data.comparable_properties.map(comp => `
+                                        <li>
+                                            <span class="comp-price">$${comp.price.toLocaleString()}</span>
+                                            <span class="comp-details">${comp.beds}bd/${comp.baths}ba, ${comp.sqft.toLocaleString()} sqft</span>
+                                            <span class="comp-address">${comp.address}</span>
+                                            <span class="comp-distance">${comp.distance_mi} mi away</span>
+                                        </li>
+                                    `).join('')}
+                                </ul>
+                            </div>
+                        `;
+                    }
+
+                    resultContent.innerHTML = `
+                        <div class="price-main">$${data.predicted_price.toLocaleString()}/mo</div>
+                        <div class="price-range">
+                            Expected range: $${data.price_range.low.toLocaleString()} - $${data.price_range.high.toLocaleString()}
+                        </div>
+                        <div class="context-card">
+                            <div>
+                                <strong>Cluster</strong>
+                                ${data.neighborhood}
+                            </div>
+                            <div>
+                                <strong>Distance to Center</strong>
+                                ${data.distance_from_center_mi} mi
+                            </div>
+                            <div>
+                                <strong>Comps Used</strong>
+                                ${(data.comparable_properties || []).length}
+                            </div>
+                        </div>
+                        <div class="details">
+                            <strong>City:</strong> ${data.city_name}<br>
+                            <strong>Neighborhood:</strong> ${data.neighborhood}<br>
+                            <strong>Coordinates:</strong> lat: ${data.coordinates.lat}, long: ${data.coordinates.lon}
+                        </div>
+                        ${compsHtml}
+                    `;
+                    resultDiv.classList.remove('error', 'loading');
+                } else {
+                    resultContent.innerHTML = `<div class="error-message">${data.error}</div>`;
+                    resultDiv.classList.add('error');
+                    resultDiv.classList.remove('loading');
+                }
+
+                resultDiv.classList.add('show');
+
+            } catch (error) {
+                resultContent.innerHTML = `<div class="error-message">Request failed: ${error.message}</div>`;
+                resultDiv.classList.add('show', 'error');
+                resultDiv.classList.remove('loading');
+            }
+
+            // Reset button
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Predict Price';
+        });
+    </script>
+</body>
+</html>

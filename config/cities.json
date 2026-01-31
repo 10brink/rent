@@ -1,0 +1,42 @@
+{
+  "ypsilanti": {
+    "display_name": "Ypsilanti",
+    "state": "MI",
+    "center_lat": 42.2411,
+    "center_lon": -83.6129,
+    "radius_miles": 6,
+    "n_clusters": 8
+  },
+  "ann_arbor": {
+    "display_name": "Ann Arbor",
+    "state": "MI",
+    "center_lat": 42.2808,
+    "center_lon": -83.7430,
+    "radius_miles": 8,
+    "n_clusters": 10
+  },
+  "detroit": {
+    "display_name": "Detroit",
+    "state": "MI",
+    "center_lat": 42.3314,
+    "center_lon": -83.0458,
+    "radius_miles": 15,
+    "n_clusters": 15
+  },
+  "lansing": {
+    "display_name": "Lansing",
+    "state": "MI",
+    "center_lat": 42.7325,
+    "center_lon": -84.5555,
+    "radius_miles": 8,
+    "n_clusters": 8
+  },
+  "east_lansing": {
+    "display_name": "East Lansing",
+    "state": "MI",
+    "center_lat": 42.7369,
+    "center_lon": -84.4839,
+    "radius_miles": 5,
+    "n_clusters": 6
+  }
+}
