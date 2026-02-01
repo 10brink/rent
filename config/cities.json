@@ -1,4 +1,5 @@
 {
+  "_comment": "n_clusters is a hint - actual count is auto-detected via silhouette score",
   "ypsilanti": {
     "display_name": "Ypsilanti",
     "state": "MI",
@@ -38,5 +39,45 @@
     "center_lon": -84.4839,
     "radius_miles": 5,
     "n_clusters": 6
+  },
+  "grand_rapids": {
+    "display_name": "Grand Rapids",
+    "state": "MI",
+    "center_lat": 42.9634,
+    "center_lon": -85.6681,
+    "radius_miles": 12,
+    "n_clusters": 12
+  },
+  "kalamazoo": {
+    "display_name": "Kalamazoo",
+    "state": "MI",
+    "center_lat": 42.2917,
+    "center_lon": -85.5872,
+    "radius_miles": 8,
+    "n_clusters": 8
+  },
+  "traverse_city": {
+    "display_name": "Traverse City",
+    "state": "MI",
+    "center_lat": 44.7631,
+    "center_lon": -85.6206,
+    "radius_miles": 8,
+    "n_clusters": 6
+  },
+  "flint": {
+    "display_name": "Flint",
+    "state": "MI",
+    "center_lat": 43.0125,
+    "center_lon": -83.6875,
+    "radius_miles": 8,
+    "n_clusters": 8
+  },
+  "warren": {
+    "display_name": "Warren",
+    "state": "MI",
+    "center_lat": 42.4773,
+    "center_lon": -83.0277,
+    "radius_miles": 6,
+    "n_clusters": 8
   }
 }

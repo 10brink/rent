@@ -5,6 +5,13 @@ Provides a CityConfig class for loading and managing city-specific settings
 from config/cities.json. Used by pipeline.py, app.py, and rental_price_model.py
 to support multi-city model training and predictions.
 
+Config fields:
+    - display_name: Human-readable city name
+    - state: Two-letter state code
+    - center_lat/center_lon: City center coordinates for API queries
+    - radius_miles: Search radius for RentCast API
+    - n_clusters: Hint for max clusters (actual count auto-detected via silhouette score)
+
 Usage:
     from city_config import CityConfig
 
@@ -125,7 +132,7 @@ class CityConfig:
     def list_cities(cls) -> list:
         """Return list of all available city slugs."""
         cls._load_config()
-        return list(cls._config_cache.keys())
+        return [k for k in cls._config_cache.keys() if not k.startswith('_')]
 
     @classmethod
     def get_all_configs(cls) -> dict:

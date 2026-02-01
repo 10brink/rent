@@ -42,6 +42,7 @@ import requests
 from catboost import CatBoostRegressor
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.metrics import mean_squared_error, make_scorer
 from sklearn.model_selection import cross_val_score
@@ -99,24 +100,45 @@ def reverse_geocode(lat: float, lon: float) -> Optional[str]:
 
 
 class KMeansClusterer(BaseEstimator, TransformerMixin):
-    """Fit KMeans on lat/lon in the training fold and assign Cluster_ID."""
+    """Fit KMeans on lat/lon in the training fold and assign Cluster_ID.
 
-    def __init__(self, n_clusters: int, random_state: int = 42, n_init: int = 10) -> None:
+    If n_clusters='auto', uses silhouette score to find optimal k.
+    """
+
+    def __init__(self, n_clusters: int = 8, random_state: int = 42, n_init: int = 10, auto_detect: bool = True) -> None:
         self.n_clusters = n_clusters
         self.random_state = random_state
         self.n_init = n_init
+        self.auto_detect = auto_detect
         self.kmeans_ = None
 
     def fit(self, X: pd.DataFrame, y=None):
         coords = X[['Latitude', 'Longitude']].copy()
         coords['Latitude'] = pd.to_numeric(coords['Latitude'], errors='coerce')
         coords['Longitude'] = pd.to_numeric(coords['Longitude'], errors='coerce')
+        coords = coords.dropna()
         n_samples = len(coords)
-        if n_samples == 0:
+        if n_samples < 6:
             self.kmeans_ = None
             self.effective_n_clusters_ = 0
             return self
-        self.effective_n_clusters_ = min(self.n_clusters, n_samples)
+
+        # Auto-detect optimal clusters if enabled and enough data
+        if self.auto_detect and n_samples >= 10:
+            min_k = 3
+            max_k = min(max(self.n_clusters + 5, 15), n_samples // 5)
+            if max_k >= min_k:
+                scores = {}
+                for k in range(min_k, max_k + 1):
+                    km = KMeans(n_clusters=k, random_state=self.random_state, n_init=self.n_init)
+                    labels = km.fit_predict(coords.values)
+                    scores[k] = silhouette_score(coords.values, labels)
+                self.effective_n_clusters_ = max(scores, key=scores.get)
+            else:
+                self.effective_n_clusters_ = min(self.n_clusters, n_samples)
+        else:
+            self.effective_n_clusters_ = min(self.n_clusters, n_samples)
+
         self.kmeans_ = KMeans(
             n_clusters=self.effective_n_clusters_,
             random_state=self.random_state,
@@ -512,16 +534,54 @@ def fetch_rentcast_data(city_config: CityConfig, max_pages: int = 10, append: bo
     return df, fetch_metadata
 
 
+def find_optimal_clusters(coords: np.ndarray, min_k: int = 3, max_k: int = 15, verbose: bool = False) -> int:
+    """
+    Find optimal number of clusters using silhouette score.
+
+    Args:
+        coords: Array of [lat, lon] coordinates
+        min_k: Minimum clusters to try (default 3)
+        max_k: Maximum clusters to try (default 15)
+        verbose: Print scores for each k
+
+    Returns:
+        Optimal number of clusters
+    """
+    n_samples = len(coords)
+
+    # Adjust bounds based on data size
+    # Need at least 2 samples per cluster for silhouette to be meaningful
+    max_k = min(max_k, n_samples // 2)
+    min_k = max(min_k, 2)
+
+    if max_k < min_k:
+        return min_k
+
+    scores = {}
+    for k in range(min_k, max_k + 1):
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+        labels = kmeans.fit_predict(coords)
+        score = silhouette_score(coords, labels)
+        scores[k] = score
+        if verbose:
+            print(f"    k={k}: silhouette={score:.3f}")
+
+    # Find k with highest silhouette score
+    best_k = max(scores, key=scores.get)
+
+    return best_k
+
+
 def add_clusters(df: pd.DataFrame, city_config: CityConfig, verbose: bool = False) -> tuple:
     """
     Add neighborhood clusters based on lat/long coordinates.
 
+    Automatically determines optimal cluster count using silhouette score.
+    The n_clusters in config is used as a hint for max_k, or ignored if auto-detection is better.
+
     Saves output as data/{city}/rentals_with_stats.csv.
     Returns tuple of (clustered DataFrame, neighborhood_names dict).
     """
-    n_clusters = city_config.n_clusters
-    print(f"\nAdding neighborhood clusters (n={n_clusters}) for {city_config.display_name}...")
-
     # Convert coordinates to numeric
     df = df.copy()
     df['Latitude'] = pd.to_numeric(df['Latitude'], errors='coerce')
@@ -531,13 +591,27 @@ def add_clusters(df: pd.DataFrame, city_config: CityConfig, verbose: bool = Fals
     df_clean = df.dropna(subset=['Latitude', 'Longitude']).copy()
     dropped = initial_count - len(df_clean)
 
-    if len(df_clean) < n_clusters:
-        raise ValueError(f"Not enough data points ({len(df_clean)}) for {n_clusters} clusters")
+    print(f"\nClustering {len(df_clean)} records for {city_config.display_name} (dropped {dropped} with missing coordinates)")
 
-    print(f"Clustering {len(df_clean)} records (dropped {dropped} with missing coordinates)")
+    if len(df_clean) < 6:
+        raise ValueError(f"Not enough data points ({len(df_clean)}) for clustering (need at least 6)")
 
-    # Perform K-Means clustering
     coords = df_clean[['Latitude', 'Longitude']].values
+
+    # Auto-detect optimal cluster count
+    # Use config n_clusters as a hint for max_k, with some flexibility
+    config_k = city_config.n_clusters
+    min_k = 3
+    max_k = min(max(config_k + 5, 15), len(df_clean) // 5)  # At least 5 listings per cluster on average
+
+    print(f"Finding optimal cluster count (testing k={min_k} to {max_k})...")
+    if verbose:
+        print("  Silhouette scores:")
+
+    n_clusters = find_optimal_clusters(coords, min_k=min_k, max_k=max_k, verbose=verbose)
+    print(f"Optimal clusters: {n_clusters} (config suggested: {config_k})")
+
+    # Perform K-Means clustering with optimal k
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
     df_clean['Cluster_ID'] = kmeans.fit_predict(coords)
 
