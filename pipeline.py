@@ -24,10 +24,15 @@ Usage:
 import argparse
 import json
 import os
+import random
+from dotenv import load_dotenv
+
+load_dotenv('.env.local')
 import shutil
 import time
 import urllib.parse
 import urllib.request
+from urllib.error import HTTPError, URLError
 from datetime import datetime
 from typing import List, Optional
 
@@ -51,7 +56,7 @@ def get_timestamp() -> str:
     return datetime.now().strftime("%Y%m%d")
 
 
-def reverse_geocode(lat: float, lon: float) -> str:
+def reverse_geocode(lat: float, lon: float) -> Optional[str]:
     """
     Reverse geocode coordinates to get neighborhood/suburb name.
 
@@ -64,19 +69,33 @@ def reverse_geocode(lat: float, lon: float) -> str:
     try:
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode())
+    except HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode(errors="replace")
+        except Exception:
+            body = ""
+        raise RuntimeError(
+            f"Nominatim HTTP {exc.code} for lat={lat}, lon={lon}. {body}".strip()
+        ) from exc
+    except URLError as exc:
+        raise RuntimeError(
+            f"Nominatim request failed for lat={lat}, lon={lon}: {exc.reason}"
+        ) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RuntimeError(
+            f"Failed to decode Nominatim response for lat={lat}, lon={lon}"
+        ) from exc
 
-        address = data.get('address', {})
+    address = data.get('address', {})
 
-        # Try to get the most descriptive local name, in order of preference
-        for key in ['neighbourhood', 'suburb', 'hamlet', 'village', 'town', 'city_district']:
-            if key in address:
-                return address[key]
+    # Try to get the most descriptive local name, in order of preference
+    for key in ['neighbourhood', 'suburb', 'hamlet', 'village', 'town', 'city_district']:
+        if key in address:
+            return address[key]
 
-        # Fallback to city or county
-        return address.get('city', address.get('county', 'Unknown'))
-
-    except Exception:
-        return None
+    # Fallback to city or county
+    return address.get('city', address.get('county', 'Unknown'))
 
 
 class KMeansClusterer(BaseEstimator, TransformerMixin):
@@ -92,8 +111,14 @@ class KMeansClusterer(BaseEstimator, TransformerMixin):
         coords = X[['Latitude', 'Longitude']].copy()
         coords['Latitude'] = pd.to_numeric(coords['Latitude'], errors='coerce')
         coords['Longitude'] = pd.to_numeric(coords['Longitude'], errors='coerce')
+        n_samples = len(coords)
+        if n_samples == 0:
+            self.kmeans_ = None
+            self.effective_n_clusters_ = 0
+            return self
+        self.effective_n_clusters_ = min(self.n_clusters, n_samples)
         self.kmeans_ = KMeans(
-            n_clusters=self.n_clusters,
+            n_clusters=self.effective_n_clusters_,
             random_state=self.random_state,
             n_init=self.n_init
         )
@@ -102,6 +127,9 @@ class KMeansClusterer(BaseEstimator, TransformerMixin):
 
     def transform(self, X: pd.DataFrame):
         X = X.copy()
+        if self.kmeans_ is None:
+            X['Cluster_ID'] = 0
+            return X
         coords = X[['Latitude', 'Longitude']].copy()
         coords['Latitude'] = pd.to_numeric(coords['Latitude'], errors='coerce')
         coords['Longitude'] = pd.to_numeric(coords['Longitude'], errors='coerce')
@@ -278,8 +306,18 @@ def fetch_rentcast_data(city_config: CityConfig, max_pages: int = 10, append: bo
 
     city_config.ensure_directories()
 
+    request_timeout = (5, 30)  # (connect, read) seconds
+    max_retries = 5
+    backoff_base = 1.0
+    backoff_max = 30.0
+    retryable_statuses = {429, 500, 502, 503, 504}
+
     print(f"\nFetching listings from RentCast API for {city_config.display_name}, {city_config.state}...")
     print(f"  Max pages: {max_pages} (up to {max_pages * 500} listings)")
+    print(
+        f"  Request timeout: {request_timeout[0]}s connect / {request_timeout[1]}s read, "
+        f"max retries: {max_retries}"
+    )
 
     all_listings = []
     pages_fetched = 0
@@ -293,27 +331,72 @@ def fetch_rentcast_data(city_config: CityConfig, max_pages: int = 10, append: bo
             "offset": (page - 1) * 500
         }
 
-        try:
-            response = requests.get(url, headers=headers, params=params)
-            response.raise_for_status()
-
-            data = response.json()
-            listings = data if isinstance(data, list) else data.get("listings", [])
-
-            if not listings:
-                print(f"  Page {page}: No more listings")
+        attempt = 0
+        while True:
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=request_timeout)
+                if response.status_code in retryable_statuses:
+                    raise requests.exceptions.HTTPError(
+                        f"Retryable HTTP {response.status_code}",
+                        response=response
+                    )
+                response.raise_for_status()
                 break
+            except requests.exceptions.HTTPError as e:
+                status_code = e.response.status_code if e.response is not None else None
+                if status_code not in retryable_statuses:
+                    raise
+                attempt += 1
+                if attempt > max_retries:
+                    raise RuntimeError(
+                        f"RentCast request failed for page {page} after {max_retries} retries "
+                        f"(last status: {status_code})"
+                    ) from e
+                retry_after = None
+                if status_code == 429 and e.response is not None:
+                    header_value = e.response.headers.get("Retry-After")
+                    if header_value:
+                        try:
+                            retry_after = int(header_value)
+                        except ValueError:
+                            retry_after = None
+                sleep_seconds = retry_after if retry_after is not None else min(
+                    backoff_base * (2 ** (attempt - 1)), backoff_max
+                )
+                sleep_seconds = sleep_seconds + random.random()
+                print(
+                    f"  Page {page}: HTTP {status_code}, retrying in {sleep_seconds:.1f}s "
+                    f"(attempt {attempt}/{max_retries})"
+                )
+                time.sleep(sleep_seconds)
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                attempt += 1
+                if attempt > max_retries:
+                    raise RuntimeError(
+                        f"RentCast request failed for page {page} after {max_retries} retries "
+                        f"({e.__class__.__name__})"
+                    ) from e
+                sleep_seconds = min(backoff_base * (2 ** (attempt - 1)), backoff_max)
+                sleep_seconds = sleep_seconds + random.random()
+                print(
+                    f"  Page {page}: {e.__class__.__name__}, retrying in {sleep_seconds:.1f}s "
+                    f"(attempt {attempt}/{max_retries})"
+                )
+                time.sleep(sleep_seconds)
 
-            all_listings.extend(listings)
-            pages_fetched = page
-            print(f"  Page {page}: {len(listings)} listings (total: {len(all_listings)})")
+        data = response.json()
+        listings = data if isinstance(data, list) else data.get("listings", [])
 
-            # If we got fewer than 500, we've reached the end
-            if len(listings) < 500:
-                break
+        if not listings:
+            print(f"  Page {page}: No more listings")
+            break
 
-        except requests.exceptions.RequestException as e:
-            print(f"  Page {page}: Error - {e}")
+        all_listings.extend(listings)
+        pages_fetched = page
+        print(f"  Page {page}: {len(listings)} listings (total: {len(all_listings)})")
+
+        # If we got fewer than 500, we've reached the end
+        if len(listings) < 500:
             break
 
     if not all_listings:
@@ -415,13 +498,21 @@ def fetch_rentcast_data(city_config: CityConfig, max_pages: int = 10, append: bo
         "state": city_config.state,
         "total_listings": len(df),
         "pages_fetched": pages_fetched,
-        "append_mode": append
+        "append_mode": append,
+        "request_timeout_seconds": {
+            "connect": request_timeout[0],
+            "read": request_timeout[1]
+        },
+        "max_retries": max_retries,
+        "backoff_base_seconds": backoff_base,
+        "backoff_max_seconds": backoff_max,
+        "retryable_statuses": sorted(retryable_statuses)
     }
 
     return df, fetch_metadata
 
 
-def add_clusters(df: pd.DataFrame, city_config: CityConfig) -> tuple:
+def add_clusters(df: pd.DataFrame, city_config: CityConfig, verbose: bool = False) -> tuple:
     """
     Add neighborhood clusters based on lat/long coordinates.
 
@@ -456,12 +547,16 @@ def add_clusters(df: pd.DataFrame, city_config: CityConfig) -> tuple:
         lambda x: neighborhood_names.get(x, f"Neighborhood {x + 1}")
     )
 
-    # Compute city-specific medians for imputation
-    city_medians = compute_city_medians(df_clean)
-
     # Clean impossible values and impute missing data (single point of transformation)
-    df_clean = clean_outliers(df_clean)
-    df_clean = impute_missing_values(df_clean, city_medians=city_medians)
+    df_clean = clean_outliers(df_clean, verbose=verbose)
+    # Compute city-specific medians for imputation (after outlier cleanup)
+    city_medians = compute_city_medians(df_clean)
+    if verbose:
+        medians_display = ", ".join(
+            f"{beds}:{sqft}" for beds, sqft in sorted(city_medians.items())
+        )
+        print(f"City medians (Beds->SqFt): {medians_display}")
+    df_clean = impute_missing_values(df_clean, city_medians=city_medians, verbose=verbose)
 
     # Save output (now clean and ready for training)
     city_config.ensure_directories()
@@ -518,13 +613,28 @@ def compute_cluster_centroids(df: pd.DataFrame, neighborhood_names: dict = None)
 
 def train_and_save_model(df: pd.DataFrame, city_config: CityConfig,
                          neighborhood_names: dict = None, dry_run: bool = False,
-                         df_for_cv: Optional[pd.DataFrame] = None) -> dict:
+                         df_for_cv: Optional[pd.DataFrame] = None,
+                         verbose: bool = False) -> dict:
     """
     Train CatBoost model on the data and save it.
 
     Returns dict with training statistics.
     """
     print(f"\nPreparing training data for {city_config.display_name}...")
+
+    def _fmt_price(value: float) -> str:
+        return "N/A" if pd.isna(value) else f"${value:,.0f}"
+
+    def _skip_training(reason: str, outlier_stats: dict, sample_count: int) -> dict:
+        print(f"[SKIP] {reason}")
+        return {
+            'n_samples': sample_count,
+            'n_outliers_removed': outlier_stats['n_removed'],
+            'cv_rmse': None,
+            'dry_run': dry_run,
+            'skipped_training': True,
+            'skip_reason': reason
+        }
 
     # Prepare features
     feature_cols = ['Beds', 'Baths', 'SqFt', 'Property Type', 'Cluster_ID']
@@ -540,7 +650,25 @@ def train_and_save_model(df: pd.DataFrame, city_config: CityConfig,
     # Remove outliers
     X, y_raw, outlier_stats = remove_outliers_iqr(X, y_raw)
     print(f"Removed {outlier_stats['n_removed']} outliers (kept {outlier_stats['n_remaining']})")
-    print(f"Price bounds: ${outlier_stats['lower_bound']:,.0f} - ${outlier_stats['upper_bound']:,.0f}")
+    print(f"Price bounds: {_fmt_price(outlier_stats['lower_bound'])} - {_fmt_price(outlier_stats['upper_bound'])}")
+    if verbose:
+        n_original = int(outlier_stats['n_original'])
+        n_removed = int(outlier_stats['n_removed'])
+        n_remaining = int(outlier_stats['n_remaining'])
+        pct_removed = (n_removed / n_original * 100) if n_original else 0.0
+        print(
+            f"Outlier removal: removed {n_removed}/{n_original} "
+            f"({pct_removed:.1f}%), remaining {n_remaining}"
+        )
+
+    n_remaining = int(outlier_stats['n_remaining'])
+    min_training_samples = 20
+    if n_remaining == 0 or y_raw.isna().all():
+        reason = "no valid prices remain after outlier removal"
+        return _skip_training(reason, outlier_stats, n_remaining)
+    if n_remaining < min_training_samples:
+        reason = f"only {n_remaining} samples after outlier removal (min {min_training_samples})"
+        return _skip_training(reason, outlier_stats, n_remaining)
 
     cat_features = ['Property Type', 'Cluster_ID']
     cat_features = [f for f in cat_features if f in X.columns]
@@ -548,7 +676,7 @@ def train_and_save_model(df: pd.DataFrame, city_config: CityConfig,
     print(f"\nTraining CatBoost model...")
     print(f"  Features: {list(X.columns)}")
     print(f"  Samples: {len(X)}")
-    print(f"  Price range: ${y_raw.min():,.0f} - ${y_raw.max():,.0f}")
+    print(f"  Price range: {_fmt_price(y_raw.min())} - {_fmt_price(y_raw.max())}")
     print("  Target transform: log1p(price)")
 
     if dry_run:
@@ -582,7 +710,16 @@ def train_and_save_model(df: pd.DataFrame, city_config: CityConfig,
             df_cv[col] = pd.to_numeric(df_cv[col], errors="coerce")
 
     required_cols = ["Beds", "Baths", "SqFt", "Property Type", "Latitude", "Longitude", "Price"]
+    cv_before = len(df_cv)
     df_cv = df_cv.dropna(subset=["Latitude", "Longitude", "Price"])
+    cv_after = len(df_cv)
+    if verbose:
+        dropped = cv_before - cv_after
+        pct_dropped = (dropped / cv_before * 100) if cv_before else 0.0
+        print(
+            f"CV data: {cv_after}/{cv_before} rows after dropping missing "
+            f"lat/lon/price ({pct_dropped:.1f}% removed)"
+        )
     X_cv = df_cv[[c for c in required_cols if c != "Price"]].copy()
     y_cv = df_cv["Price"].copy()
 
@@ -720,7 +857,10 @@ def print_summary(city_config: CityConfig, backup_info: dict, fetch_count: int,
     print(f"  Training samples: {training_stats['n_samples']}")
     print(f"  Outliers removed: {training_stats['n_outliers_removed']}")
 
-    if training_stats.get('dry_run'):
+    if training_stats.get('skipped_training'):
+        reason = training_stats.get('skip_reason', 'insufficient data')
+        print(f"  [SKIPPED - {reason}]")
+    elif training_stats.get('dry_run'):
         print("  [DRY RUN - No model saved]")
     else:
         print(f"  New CV RMSE: ${training_stats['cv_rmse']:,.2f}")
@@ -752,6 +892,8 @@ def main():
                         help='Do not backup existing model')
     parser.add_argument('--append', action='store_true',
                         help='Append new listings to existing data instead of replacing')
+    parser.add_argument('--verbose', action='store_true',
+                        help='Show extra data quality and training logs')
     parser.add_argument('--max-pages', type=int, default=10,
                         help='Maximum number of API pages to fetch (default: 10)')
     parser.add_argument('--list-cities', action='store_true',
@@ -791,7 +933,7 @@ def main():
 
     # Step 3: Add clusters
     print("\n[Step 3/4] Adding neighborhood clusters...")
-    df_clustered, neighborhood_names = add_clusters(df_raw, city_config)
+    df_clustered, neighborhood_names = add_clusters(df_raw, city_config, verbose=args.verbose)
     cluster_count = len(df_clustered)
 
     # Step 4: Train and save model
@@ -800,7 +942,8 @@ def main():
         df_clustered, city_config,
         neighborhood_names=neighborhood_names,
         dry_run=args.dry_run,
-        df_for_cv=df_raw
+        df_for_cv=df_raw,
+        verbose=args.verbose
     )
 
     # Print summary

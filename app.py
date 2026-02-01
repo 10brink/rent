@@ -19,10 +19,14 @@ Run with: python3 app.py (starts on port 5001)
 
 import os
 import math
+import json
+from datetime import datetime
+from pathlib import Path
 import pandas as pd
 from flask import Flask, request, jsonify, render_template
 from rental_price_model import load_saved_model, predict_price, geocode_address, find_nearest_cluster
 from city_config import CityConfig
+from evaluate_comps_knn import compute_comps_metrics
 
 app = Flask(__name__)
 
@@ -30,6 +34,64 @@ app = Flask(__name__)
 _model_cache = {}
 _comps_cache = {}
 _metadata_cache = {}
+_comps_metrics_cache = {}
+_avg_rents_cache = {}
+
+POOLED_SFH_CITIES = {'east_lansing', 'lansing'}
+POOLED_SFH_MODEL_KEY = '__pooled_sfh_lansing_east_lansing'
+POOLED_SFH_MODEL_PATH = (
+    Path(__file__).parent
+    / 'models'
+    / 'pools'
+    / 'lansing_east_lansing_sfh'
+    / 'rental_price_model.cbm'
+)
+
+
+@app.route('/')
+def index():
+    display_order = ['Ann Arbor', 'Ypsilanti', 'Detroit', 'East Lansing', 'Lansing']
+    city_names = []
+    for slug in CityConfig.list_trained_cities():
+        config = CityConfig(slug)
+        city_names.append(config.display_name)
+    order_index = {name: idx for idx, name in enumerate(display_order)}
+    city_names.sort(key=lambda name: (order_index.get(name, 999), name))
+    return render_template('index.html', city_names=city_names)
+
+
+@app.route('/methodology')
+def methodology():
+    comps_k = 5
+    cities = []
+    for slug in CityConfig.list_trained_cities():
+        config = CityConfig(slug)
+        metadata = get_city_metadata(slug)
+        cv_rmse = metadata.get('cv_rmse')
+        cv_rmse_display = f"${cv_rmse:,.0f}" if isinstance(cv_rmse, (int, float)) else "n/a"
+        comps_metrics = get_comps_metrics(slug, k=comps_k)
+        comps_rmse = comps_metrics.get('rmse') if comps_metrics else None
+        comps_n = comps_metrics.get('n_predictions') if comps_metrics else None
+        comps_rmse_display = f"${comps_rmse:,.0f}" if isinstance(comps_rmse, (int, float)) else "n/a"
+        cities.append({
+            'slug': slug,
+            'name': config.display_name,
+            'state': config.state,
+            'model_type': metadata.get('model_type', 'CatBoostRegressor'),
+            'cv_rmse': cv_rmse,
+            'cv_rmse_display': cv_rmse_display,
+            'comps_rmse_display': comps_rmse_display,
+            'comps_n': comps_n,
+            'target_transform': metadata.get('target_transform')
+        })
+    cities.sort(key=lambda c: c['name'])
+    return render_template('methodology.html', cities=cities, comps_k=comps_k)
+
+
+@app.route('/averages')
+def averages():
+    city_tables, updated_date = get_avg_rent_tables()
+    return render_template('averages.html', city_tables=city_tables, updated_date=updated_date)
 
 
 def get_city_model(city_slug: str) -> tuple:
@@ -60,8 +122,254 @@ def get_city_model(city_slug: str) -> tuple:
     return model, metadata, _comps_cache[city_slug]
 
 
+def get_city_metadata(city_slug: str) -> dict:
+    """Load metadata JSON for a city without loading the full model."""
+    if city_slug in _metadata_cache:
+        return _metadata_cache[city_slug]
+
+    config = CityConfig(city_slug)
+    if not config.metadata_path.exists():
+        raise ValueError(f"Missing metadata for {config.display_name}")
+
+    with open(config.metadata_path, 'r') as f:
+        metadata = json.load(f)
+    _metadata_cache[city_slug] = metadata
+    return metadata
+
+
+def get_comps_metrics(city_slug: str, k: int = 5) -> dict:
+    """Compute or retrieve comps-average CV metrics for a city."""
+    cache_key = f"{city_slug}:{k}"
+    if cache_key in _comps_metrics_cache:
+        return _comps_metrics_cache[cache_key]
+    try:
+        metrics = compute_comps_metrics(city_slug, k=k, property_type_filter=True, min_comps=1)
+    except Exception:
+        metrics = None
+    _comps_metrics_cache[cache_key] = metrics
+    return metrics
+
+
+PROPERTY_TYPE_ORDER = [
+    'Apartment',
+    'Condo',
+    'Townhouse',
+    'Single Family',
+    'Multi-Family',
+]
+
+
+def normalize_property_type(value: str) -> str:
+    """Normalize property type text for consistent grouping."""
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if not cleaned:
+        return None
+    key = cleaned.lower()
+    canonical = {
+        'apartment': 'Apartment',
+        'condo': 'Condo',
+        'single family': 'Single Family',
+        'single-family': 'Single Family',
+        'multi family': 'Multi-Family',
+        'multi-family': 'Multi-Family',
+        'multifamily': 'Multi-Family',
+        'townhouse': 'Townhouse',
+        'townhome': 'Townhouse',
+    }
+    return canonical.get(key, cleaned)
+
+
+def format_beds_value(beds: float) -> str:
+    """Format beds for display while keeping numeric grouping."""
+    if beds is None or pd.isna(beds):
+        return None
+    if abs(beds - round(beds)) < 1e-6:
+        return str(int(round(beds)))
+    return f"{beds:g}"
+
+
+def build_avg_rent_tables(rows: list) -> list:
+    """Shape average-rent rows into per-city tables."""
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row['city'], []).append(row)
+
+    order_index = {name: idx for idx, name in enumerate(PROPERTY_TYPE_ORDER)}
+    tables = []
+
+    for city_name, city_rows in grouped.items():
+        property_types = sorted(
+            {row['property_type'] for row in city_rows},
+            key=lambda name: (order_index.get(name, 999), name)
+        )
+        beds_map = {}
+        for row in city_rows:
+            label = row['beds']
+            value = row.get('_beds_sort')
+            if value is None:
+                try:
+                    value = float(label)
+                except (TypeError, ValueError):
+                    continue
+            beds_map.setdefault(label, value)
+
+        bed_labels = [label for label, _ in sorted(beds_map.items(), key=lambda item: item[1])]
+
+        cells = {}
+        for row in city_rows:
+            cells.setdefault(row['property_type'], {})[row['beds']] = {
+                'avg_price': row['avg_price'],
+                'listings': row['listings'],
+            }
+
+        tables.append({
+            'city': city_name,
+            'slug': city_rows[0].get('city_slug'),
+            'property_types': property_types,
+            'beds': bed_labels,
+            'cells': cells,
+        })
+
+    tables.sort(key=lambda item: item['city'])
+    return tables
+
+
+def get_avg_rent_rows() -> tuple:
+    """Build table rows of average rents by city, property type, and beds."""
+    mtimes = {}
+    for slug in CityConfig.list_trained_cities():
+        config = CityConfig(slug)
+        mtimes[slug] = config.data_path.stat().st_mtime if config.data_path.exists() else None
+
+    cache_key = json.dumps(mtimes, sort_keys=True)
+    if _avg_rents_cache.get('key') == cache_key:
+        return _avg_rents_cache['rows'], _avg_rents_cache.get('updated_date')
+
+    rows = []
+    latest_mtime = None
+
+    for slug in CityConfig.list_trained_cities():
+        config = CityConfig(slug)
+        data_path = config.data_path
+        if not data_path.exists():
+            continue
+
+        try:
+            df = pd.read_csv(data_path, usecols=['Price', 'Beds', 'Property Type'])
+        except ValueError:
+            df = pd.read_csv(data_path)
+
+        required_cols = {'Price', 'Beds', 'Property Type'}
+        if not required_cols.issubset(df.columns):
+            continue
+
+        df = df[['Price', 'Beds', 'Property Type']].copy()
+        df = df.rename(columns={
+            'Price': 'price',
+            'Beds': 'beds',
+            'Property Type': 'property_type'
+        })
+
+        if df['price'].dtype == object:
+            df['price'] = df['price'].astype(str).str.replace(r'[$,]', '', regex=True)
+
+        df['price'] = pd.to_numeric(df['price'], errors='coerce')
+        df['beds'] = pd.to_numeric(df['beds'], errors='coerce')
+        df['property_type'] = df['property_type'].apply(normalize_property_type)
+
+        df = df.dropna(subset=['price', 'beds', 'property_type'])
+        df = df[(df['price'] > 0) & (df['beds'] >= 0)]
+
+        if df.empty:
+            continue
+
+        grouped = (
+            df.groupby(['property_type', 'beds'])
+            .agg(avg_price=('price', 'mean'), listings=('price', 'size'))
+            .reset_index()
+        )
+
+        for row in grouped.itertuples(index=False):
+            beds_value = float(row.beds)
+            rows.append({
+                'city': f"{config.display_name}, {config.state}",
+                'city_slug': slug,
+                'property_type': row.property_type,
+                'beds': format_beds_value(beds_value),
+                'avg_price': round(row.avg_price),
+                'listings': int(row.listings),
+                '_city_sort': config.display_name.lower(),
+                '_beds_sort': beds_value
+            })
+
+        file_mtime = data_path.stat().st_mtime
+        latest_mtime = file_mtime if latest_mtime is None else max(latest_mtime, file_mtime)
+
+    rows.sort(key=lambda r: (r['_city_sort'], r['property_type'], r['_beds_sort']))
+    for row in rows:
+        row.pop('_city_sort', None)
+        row.pop('_beds_sort', None)
+
+    updated_date = (
+        datetime.fromtimestamp(latest_mtime).strftime('%B %d, %Y')
+        if latest_mtime else None
+    )
+
+    tables = build_avg_rent_tables(rows)
+
+    _avg_rents_cache.update({
+        'key': cache_key,
+        'rows': rows,
+        'tables': tables,
+        'updated_date': updated_date
+    })
+    return rows, updated_date
+
+
+def get_avg_rent_tables() -> tuple:
+    """Return per-city tables and updated date for average rents."""
+    rows, updated_date = get_avg_rent_rows()
+    tables = _avg_rents_cache.get('tables')
+    if tables is None:
+        tables = build_avg_rent_tables(rows)
+        _avg_rents_cache['tables'] = tables
+    return tables, updated_date
+
+
+def get_pooled_sfh_model() -> tuple:
+    """
+    Load pooled Single Family model for Lansing + East Lansing.
+
+    Returns (model, metadata) tuple.
+    Raises ValueError if the pooled model is missing.
+    """
+    if POOLED_SFH_MODEL_KEY in _model_cache:
+        return _model_cache[POOLED_SFH_MODEL_KEY], _metadata_cache[POOLED_SFH_MODEL_KEY]
+
+    if not POOLED_SFH_MODEL_PATH.exists():
+        raise ValueError(
+            "Pooled SFH model not found. Train it at "
+            f"{POOLED_SFH_MODEL_PATH}"
+        )
+
+    model, metadata = load_saved_model(model_path=str(POOLED_SFH_MODEL_PATH))
+    _model_cache[POOLED_SFH_MODEL_KEY] = model
+    _metadata_cache[POOLED_SFH_MODEL_KEY] = metadata
+    return model, metadata
+
+
 # Valid property types (must match training data)
-VALID_PROPERTY_TYPES = ['Apartment', 'Single Family', 'Condo', 'Townhouse', 'Multi Family']
+PROPERTY_TYPE_ALIASES = {
+    'Multi Family': 'Multi-Family',
+    'Multifamily': 'Multi-Family',
+}
+VALID_PROPERTY_TYPES = ['Apartment', 'Single Family', 'Condo', 'Townhouse', 'Multi-Family']
+VALID_PREDICTION_MODES = ['auto', 'model', 'comps']
+DEFAULT_COMPS_K = 5
+MIN_COMPS_K = 3
+MAX_COMPS_K = 10
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -116,7 +424,8 @@ def detect_city(lat: float, lon: float) -> tuple:
 
 
 def find_comparable_properties(lat: float, lon: float, beds: int, baths: float, sqft: int,
-                                cluster_id: int, comps_df: pd.DataFrame, n_comps: int = 5) -> list:
+                                cluster_id: int, comps_df: pd.DataFrame, n_comps: int = 5,
+                                property_type: str = None) -> list:
     """
     Find the N most similar properties from training data.
 
@@ -128,6 +437,11 @@ def find_comparable_properties(lat: float, lon: float, beds: int, baths: float, 
         return []
 
     df = comps_df.copy()
+    if property_type:
+        target_type = str(property_type).strip().lower()
+        df = df[df['Property Type'].astype(str).str.lower() == target_type].copy()
+        if df.empty:
+            return []
 
     # Filter to same cluster first (neighborhood match is most important for real estate)
     cluster_matches = df[df['Cluster_ID'] == cluster_id]
@@ -172,6 +486,7 @@ def find_comparable_properties(lat: float, lon: float, beds: int, baths: float, 
             'beds': int(row['Beds']),
             'baths': float(row['Baths']),
             'sqft': int(row['SqFt']),
+            'property_type': row.get('Property Type'),
             'neighborhood': row.get('Neighborhood', f"Cluster {row['Cluster_ID']}"),
             'distance_mi': round(row['geo_dist'], 2)
         })
@@ -238,20 +553,33 @@ def validate_input(data: dict) -> tuple:
 
     # Property type validation
     property_type = data.get('property_type', '').strip()
+    if property_type in PROPERTY_TYPE_ALIASES:
+        property_type = PROPERTY_TYPE_ALIASES[property_type]
     if property_type not in VALID_PROPERTY_TYPES:
         errors.append(f"Invalid property_type. Must be one of: {VALID_PROPERTY_TYPES}")
     validated['property_type'] = property_type
+
+    # Prediction mode validation (optional)
+    prediction_mode_raw = data.get('prediction_mode', 'auto')
+    prediction_mode = 'auto' if prediction_mode_raw is None else str(prediction_mode_raw).strip().lower()
+    if prediction_mode not in VALID_PREDICTION_MODES:
+        errors.append(f"Invalid prediction_mode. Must be one of: {VALID_PREDICTION_MODES}")
+    validated['prediction_mode'] = prediction_mode
+
+    # Comps override (optional)
+    comps_k_raw = data.get('comps_k', DEFAULT_COMPS_K)
+    try:
+        comps_k = int(comps_k_raw)
+        if comps_k < MIN_COMPS_K or comps_k > MAX_COMPS_K:
+            errors.append(f"comps_k must be between {MIN_COMPS_K} and {MAX_COMPS_K}")
+        validated['comps_k'] = comps_k
+    except (ValueError, TypeError):
+        errors.append("comps_k must be a valid integer")
 
     if errors:
         return None, "; ".join(errors)
 
     return validated, None
-
-
-@app.route('/')
-def index():
-    """Render the web form UI."""
-    return render_template('index.html')
 
 
 @app.route('/api/cities', methods=['GET'])
@@ -292,15 +620,21 @@ def api_predict():
         "sqft": 900,
         "beds": 2,
         "baths": 1,
-        "property_type": "Apartment"
+        "property_type": "Apartment",
+        "prediction_mode": "auto",  // auto | comps | model
+        "comps_k": 5
     }
 
     Response JSON:
     {
         "predicted_price": 1220,
         "price_range": {"low": 978, "high": 1462},
+        "model_prediction": {"price": 1280, "price_range": {"low": 1040, "high": 1520}},
+        "comps_prediction": {"price": 1220, "price_range": {"low": 1100, "high": 1350}, "count": 5},
+        "prediction_order": ["model", "comps"],
         "city": "ypsilanti",
         "city_name": "Ypsilanti",
+        "prediction_mode_used": "model",
         "neighborhood": "Midtown",
         "coordinates": {"lat": 42.2803, "lon": -83.7431},
         "comparable_properties": [
@@ -326,8 +660,40 @@ def api_predict():
         # Auto-detect city from coordinates
         city_slug, city_config = detect_city(lat, lon)
 
-        # Load model and data for detected city
-        model, metadata, comps_df = get_city_model(city_slug)
+        # Load model and data for detected city (used for centroids/comps)
+        city_model, city_metadata, comps_df = get_city_model(city_slug)
+
+        prediction_mode = validated.get('prediction_mode', 'auto')
+        comps_k = validated.get('comps_k', DEFAULT_COMPS_K)
+
+        # KNN comps for East Lansing single-family homes (auto mode)
+        use_comps_knn = (
+            prediction_mode == 'comps'
+            or (
+                prediction_mode == 'auto'
+                and validated['property_type'] == 'Single Family'
+                and city_slug == 'east_lansing'
+            )
+        )
+
+        # Optionally use pooled SFH model for Lansing + East Lansing
+        use_pooled_sfh = (
+            validated['property_type'] == 'Single Family'
+            and city_slug in POOLED_SFH_CITIES
+            and not use_comps_knn
+        )
+        model = city_model
+        model_metadata = city_metadata
+        extra_features = None
+        if use_pooled_sfh:
+            try:
+                model, model_metadata = get_pooled_sfh_model()
+                extra_features = {'City_Slug': city_slug}
+            except ValueError:
+                # Fall back to city-specific model if pooled model missing
+                model = city_model
+                model_metadata = city_metadata
+                extra_features = None
 
         # Calculate distance from city center
         distance_from_center = haversine_distance(
@@ -336,7 +702,7 @@ def api_predict():
         )
 
         # Find nearest cluster
-        centroids = {int(k): v for k, v in metadata['cluster_centroids'].items()}
+        centroids = {int(k): v for k, v in city_metadata['cluster_centroids'].items()}
         cluster_id = find_nearest_cluster(lat, lon, centroids)
 
         # Get neighborhood name (from metadata, or fall back to training data)
@@ -352,22 +718,6 @@ def api_predict():
             else:
                 neighborhood_name = f'Cluster {cluster_id}'
 
-        # Make prediction
-        predicted_price = predict_price(
-            model=model,
-            beds=validated['beds'],
-            baths=validated['baths'],
-            sqft=validated['sqft'],
-            property_type=validated['property_type'],
-            cluster_id=cluster_id,
-            metadata=metadata
-        )
-
-        # Calculate price range using CV RMSE
-        cv_rmse = metadata.get('cv_rmse', 242.0)
-        price_low = max(0, predicted_price - cv_rmse)
-        price_high = predicted_price + cv_rmse
-
         # Find comparable properties
         comps = find_comparable_properties(
             lat=lat,
@@ -377,8 +727,64 @@ def api_predict():
             sqft=validated['sqft'],
             cluster_id=cluster_id,
             comps_df=comps_df,
-            n_comps=5
+            n_comps=comps_k,
+            property_type=validated['property_type'] if use_comps_knn else None
         )
+
+        # Build comps prediction (if available)
+        comp_prices = [c['price'] for c in comps if isinstance(c.get('price'), (int, float))]
+        comps_avg = None
+        comps_low = None
+        comps_high = None
+        comps_count = 0
+        if comp_prices:
+            comps_count = len(comp_prices)
+            comps_avg = sum(comp_prices) / comps_count
+            comps_low = min(comp_prices)
+            comps_high = max(comp_prices)
+        elif prediction_mode == 'comps':
+            return jsonify({'error': 'No comparable properties found for comps-average mode. Try model mode.'}), 400
+
+        # Always compute model prediction for display
+        model_prediction = predict_price(
+            model=model,
+            beds=validated['beds'],
+            baths=validated['baths'],
+            sqft=validated['sqft'],
+            property_type=validated['property_type'],
+            cluster_id=cluster_id,
+            metadata=model_metadata,
+            extra_features=extra_features
+        )
+
+        # Calculate model price range using CV RMSE
+        cv_rmse = model_metadata.get('cv_rmse', 242.0)
+        model_low = max(0, model_prediction - cv_rmse)
+        model_high = model_prediction + cv_rmse
+
+        comps_only_rule_applied = (
+            prediction_mode == 'auto'
+            and validated['property_type'] == 'Single Family'
+            and city_slug == 'east_lansing'
+        )
+
+        used_comps_average = use_comps_knn and comps_avg is not None
+        primary_mode = 'comps' if used_comps_average else 'model'
+
+        if primary_mode == 'comps':
+            predicted_price = comps_avg
+            price_low = comps_low
+            price_high = comps_high
+        else:
+            predicted_price = model_prediction
+            price_low = model_low
+            price_high = model_high
+
+        prediction_order = ['model', 'comps']
+        if comps_only_rule_applied and comps_avg is not None:
+            prediction_order = ['comps', 'model']
+        if comps_avg is None:
+            prediction_order = [mode for mode in prediction_order if mode != 'comps']
 
         return jsonify({
             'predicted_price': round(predicted_price),
@@ -386,8 +792,28 @@ def api_predict():
                 'low': round(price_low),
                 'high': round(price_high)
             },
+            'model_prediction': {
+                'price': round(model_prediction),
+                'price_range': {
+                    'low': round(model_low),
+                    'high': round(model_high)
+                }
+            },
+            'comps_prediction': None if comps_avg is None else {
+                'price': round(comps_avg),
+                'price_range': {
+                    'low': round(comps_low),
+                    'high': round(comps_high)
+                },
+                'count': comps_count
+            },
+            'prediction_order': prediction_order,
             'city': city_slug,
             'city_name': city_config.display_name,
+            'state': city_config.state,
+            'comps_k': comps_k,
+            'prediction_mode_requested': prediction_mode,
+            'prediction_mode_used': primary_mode,
             'neighborhood': neighborhood_name,
             'coordinates': {
                 'lat': round(lat, 4),

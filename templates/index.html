@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rental Price Predictor</title>
+    <title>Rental Price Predictor{% if city_names %} — {{ city_names|join(' + ') }}{% endif %}</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Space+Grotesk:wght@400;500;600&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Source+Sans+3:wght@400;500;600&display=swap');
 
         :root {
             --ink: #1f2a2a;
@@ -16,17 +16,18 @@
             --panel-strong: rgba(255, 255, 255, 0.96);
             --shadow: 0 24px 70px rgba(12, 30, 32, 0.28);
             --border: rgba(15, 118, 110, 0.2);
+            --city-bg: url('/static/annarbor.webp');
         }
 
         * {
             box-sizing: border-box;
         }
         body {
-            font-family: 'Space Grotesk', sans-serif;
+            font-family: 'Source Sans 3', sans-serif;
             margin: 0;
             min-height: 100vh;
             padding: 48px 20px 64px;
-            background: url('/static/ypsi.webp') 80% center / auto 100% repeat-x fixed;
+            background: var(--city-bg) left center / auto 100% repeat-x fixed;
             color: var(--ink);
             position: relative;
         }
@@ -156,10 +157,36 @@
             color: #0f5f2f;
             text-align: center;
         }
+        .price-secondary {
+            font-size: 20px;
+            font-weight: 600;
+            color: #2f5b4e;
+            text-align: center;
+            margin-top: 8px;
+        }
         .price-range {
             text-align: center;
             color: #47615b;
             margin-top: 5px;
+        }
+        .price-range.secondary {
+            font-size: 13px;
+            color: #5a6a66;
+        }
+        .input-summary {
+            margin-top: 10px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            justify-content: center;
+        }
+        .input-summary span {
+            background: rgba(15, 118, 110, 0.08);
+            border: 1px solid rgba(15, 118, 110, 0.2);
+            color: #2d4b46;
+            font-size: 12px;
+            padding: 4px 10px;
+            border-radius: 999px;
         }
         .details {
             margin-top: 15px;
@@ -201,6 +228,25 @@
             padding-top: 15px;
             border-top: 1px solid rgba(15, 118, 110, 0.25);
         }
+        .page-footer {
+            margin-top: 18px;
+            text-align: center;
+            color: #5a6a66;
+            font-size: 13px;
+        }
+        .page-footer a {
+            color: var(--accent);
+            text-decoration: none;
+            font-weight: 600;
+        }
+        .page-footer a:hover {
+            color: var(--accent-dark);
+            text-decoration: underline;
+        }
+        .page-footer .footer-sep {
+            margin: 0 10px;
+            color: #7b8a86;
+        }
         .comps-list {
             list-style: none;
             padding: 0;
@@ -230,11 +276,21 @@
         .comp-address {
             font-size: 12px;
             color: #52625e;
+            text-decoration: none;
+        }
+        .comp-address:hover {
+            color: #0b5b55;
+            text-decoration: underline;
         }
         .comp-distance {
             font-size: 11px;
             color: #73807d;
             grid-column: 2;
+            text-decoration: none;
+        }
+        .comp-distance:hover {
+            color: #0b5b55;
+            text-decoration: underline;
         }
         @keyframes liftIn {
             from {
@@ -249,7 +305,7 @@
         @media (max-width: 600px) {
             body {
                 padding: 32px 16px 48px;
-                background-position: 70% top;
+                background-position: left top;
                 background-size: 180% auto;
                 background-attachment: scroll;
             }
@@ -259,7 +315,7 @@
         }
         @media (min-width: 1100px) {
             body {
-                background-position: 95% center;
+                background-position: left center;
             }
             .page-wrap {
                 max-width: 620px;
@@ -271,7 +327,7 @@
 </head>
 <body>
     <div class="page-wrap">
-    <h1>Rental Price Predictor — Ypsilanti, MI</h1>
+    <h1>Rental Price Predictor{% if city_names %} — {{ city_names|join(' + ') }}{% endif %}</h1>
 
         <div class="form-container">
         <form id="prediction-form">
@@ -329,6 +385,11 @@
                 <div id="result-content"></div>
             </div>
         </div>
+        <div class="page-footer">
+            <a href="/methodology">Methodology &amp; error confidence</a>
+            <span class="footer-sep">&middot;</span>
+            <a href="/averages">Average rents by city</a>
+        </div>
     </div>
 
     <script>
@@ -336,6 +397,33 @@
         const resultDiv = document.getElementById('result');
         const resultContent = document.getElementById('result-content');
         const submitBtn = document.getElementById('submit-btn');
+        const pageTitle = document.querySelector('h1');
+        const baseTitle = 'Rental Price Predictor';
+        const backgroundByCity = {
+            ann_arbor: "url('/static/annarbor.webp')",
+            ypsilanti: "url('/static/ypsi.webp')",
+            lansing: "url('/static/spartanStadium.webp')",
+            east_lansing: "url('/static/spartanStadium.webp')"
+        };
+
+        const zillowSearchUrl = (address, cityName, state) => {
+            const parts = [address, cityName, state].filter(Boolean).join(', ');
+            const cleaned = parts.trim().replace(/,/g, '').replace(/\s+/g, '-');
+            return `https://www.zillow.com/homes/for_rent/${encodeURIComponent(cleaned)}_rb/`;
+        };
+        const googleMapsUrl = (address, cityName, state) => {
+            const parts = [address, cityName, state].filter(Boolean).join(', ');
+            return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(parts)}`;
+        };
+
+        const setCityBackground = (citySlug, cityName, state) => {
+            const background = backgroundByCity[citySlug] || backgroundByCity.ypsilanti;
+            document.body.style.setProperty('--city-bg', background);
+            if (pageTitle && cityName) {
+                const stateSuffix = state ? `, ${state}` : '';
+                pageTitle.textContent = `${baseTitle} — ${cityName}${stateSuffix}`;
+            }
+        };
 
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -378,6 +466,7 @@
                 const data = await response.json();
 
                 if (response.ok) {
+                    setCityBackground(data.city, data.city_name, data.state);
                     let compsHtml = '';
                     if (data.comparable_properties && data.comparable_properties.length > 0) {
                         compsHtml = `
@@ -387,9 +476,9 @@
                                     ${data.comparable_properties.map(comp => `
                                         <li>
                                             <span class="comp-price">$${comp.price.toLocaleString()}</span>
-                                            <span class="comp-details">${comp.beds}bd/${comp.baths}ba, ${comp.sqft.toLocaleString()} sqft</span>
-                                            <span class="comp-address">${comp.address}</span>
-                                            <span class="comp-distance">${comp.distance_mi} mi away</span>
+                                            <span class="comp-details">${comp.beds}bd/${comp.baths}ba, ${comp.sqft.toLocaleString()} sqft${comp.property_type ? ` • ${comp.property_type}` : ''}</span>
+                                            <a class="comp-address" href="${zillowSearchUrl(comp.address, data.city_name, data.state)}" target="_blank" rel="noopener noreferrer">${comp.address}</a>
+                                            <a class="comp-distance" href="${googleMapsUrl(comp.address, data.city_name, data.state)}" target="_blank" rel="noopener noreferrer">${comp.distance_mi} mi away</a>
                                         </li>
                                     `).join('')}
                                 </ul>
@@ -397,11 +486,64 @@
                         `;
                     }
 
-                    resultContent.innerHTML = `
-                        <div class="price-main">$${data.predicted_price.toLocaleString()}/mo</div>
-                        <div class="price-range">
-                            Expected range: $${data.price_range.low.toLocaleString()} - $${data.price_range.high.toLocaleString()}
+                    const inputSummaryHtml = `
+                        <div class="input-summary">
+                            <span>${formData.beds} bd</span>
+                            <span>${formData.baths} ba</span>
+                            <span>${formData.sqft.toLocaleString()} sqft</span>
+                            <span>${formData.property_type}</span>
                         </div>
+                    `;
+
+                    const predictionOrder = Array.isArray(data.prediction_order)
+                        ? data.prediction_order
+                        : ['model', 'comps'];
+
+                    const predictionMap = {
+                        model: data.model_prediction
+                            ? {
+                                label: 'Model prediction',
+                                rangeLabel: 'Expected range',
+                                payload: data.model_prediction
+                            }
+                            : null,
+                        comps: data.comps_prediction
+                            ? {
+                                label: `Comps average${data.comps_prediction.count ? ` (n=${data.comps_prediction.count})` : ''}`,
+                                rangeLabel: 'Comps range',
+                                payload: data.comps_prediction
+                            }
+                            : null
+                    };
+
+                    const orderedPredictions = [];
+                    predictionOrder.forEach((mode) => {
+                        const entry = predictionMap[mode];
+                        if (entry) {
+                            orderedPredictions.push(entry);
+                        }
+                    });
+                    if (orderedPredictions.length === 0 && predictionMap.model) {
+                        orderedPredictions.push(predictionMap.model);
+                    }
+                    if (orderedPredictions.length === 1 && predictionMap.comps) {
+                        orderedPredictions.push(predictionMap.comps);
+                    }
+
+                    const predictionHtml = orderedPredictions.map((entry, index) => {
+                        const priceClass = index === 0 ? 'price-main' : 'price-secondary';
+                        const rangeClass = index === 0 ? 'price-range' : 'price-range secondary';
+                        return `
+                            <div class="${priceClass}">${entry.label}: $${entry.payload.price.toLocaleString()}/mo</div>
+                            <div class="${rangeClass}">
+                                ${entry.rangeLabel}: $${entry.payload.price_range.low.toLocaleString()} - $${entry.payload.price_range.high.toLocaleString()}
+                            </div>
+                        `;
+                    }).join('');
+
+                    resultContent.innerHTML = `
+                        ${predictionHtml}
+                        ${inputSummaryHtml}
                         <div class="context-card">
                             <div>
                                 <strong>Cluster</strong>
@@ -414,6 +556,10 @@
                             <div>
                                 <strong>Comps Used</strong>
                                 ${(data.comparable_properties || []).length}
+                            </div>
+                            <div>
+                                <strong>Primary</strong>
+                                ${data.prediction_mode_used === 'comps' ? 'Comps average' : 'Model'}
                             </div>
                         </div>
                         <div class="details">

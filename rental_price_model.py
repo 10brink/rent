@@ -37,7 +37,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 
 
-def clean_outliers(df: pd.DataFrame) -> pd.DataFrame:
+def clean_outliers(df: pd.DataFrame, verbose: bool = False) -> pd.DataFrame:
     """
     Remove rows with impossible/erroneous values before imputation.
 
@@ -54,8 +54,9 @@ def clean_outliers(df: pd.DataFrame) -> pd.DataFrame:
     df = df[~(df['SqFt'] > 5000)]
 
     removed = before - len(df)
-    if removed > 0:
-        print(f"Removed {removed} rows with invalid SqFt values")
+    if verbose:
+        pct = (removed / before * 100) if before else 0.0
+        print(f"Outlier cleanup: removed {removed} rows ({pct:.1f}%), remaining {len(df)}")
 
     return df
 
@@ -82,7 +83,7 @@ def compute_city_medians(df: pd.DataFrame) -> dict:
     return medians
 
 
-def impute_missing_values(df: pd.DataFrame, city_medians: dict = None) -> pd.DataFrame:
+def impute_missing_values(df: pd.DataFrame, city_medians: dict = None, verbose: bool = False) -> pd.DataFrame:
     """
     Impute missing Beds, Baths, and SqFt values.
 
@@ -164,7 +165,7 @@ def impute_missing_values(df: pd.DataFrame, city_medians: dict = None) -> pd.Dat
         baths_imputed += remaining_baths
         df.loc[df['Baths'].isna(), 'Baths'] = 1.0  # Default
 
-    if beds_imputed > 0 or baths_imputed > 0 or sqft_imputed > 0:
+    if verbose:
         print(f"Imputed values - Beds: {beds_imputed}, Baths: {baths_imputed}, SqFt: {sqft_imputed}")
 
     return df
@@ -502,6 +503,11 @@ def normalize_address(address: str) -> list:
 
     variations = [address]
 
+    def add_variation(value: str) -> None:
+        cleaned = re.sub(r'\s+', ' ', value).strip()
+        if cleaned and cleaned not in variations:
+            variations.append(cleaned)
+
     # Common abbreviation mappings
     abbreviations = {
         r'\bSt\b\.?': 'Street',
@@ -526,6 +532,21 @@ def normalize_address(address: str) -> list:
         r'\bOH\b': 'Ohio',
         r'\bIN\b': 'Indiana',
     }
+
+    # Try merging the last two words of a street name (e.g., "May Apple" -> "Mayapple")
+    stripped = re.sub(r'[.,]', '', address).strip()
+    tokens = re.split(r'\s+', stripped)
+    suffixes = {
+        'st', 'street', 'rd', 'road', 'ave', 'avenue', 'blvd', 'boulevard',
+        'dr', 'drive', 'ln', 'lane', 'ct', 'court', 'pl', 'place',
+        'cir', 'circle', 'pkwy', 'parkway', 'hwy', 'highway'
+    }
+    for idx, token in enumerate(tokens):
+        if token.lower() in suffixes and idx >= 3:
+            merged = tokens[:]
+            merged[idx - 2:idx] = [''.join(tokens[idx - 2:idx])]
+            add_variation(' '.join(merged))
+            break
 
     # Try expanding street abbreviations
     expanded = address
@@ -552,6 +573,23 @@ def normalize_address(address: str) -> list:
     no_zip = re.sub(r'\b\d{5}(-\d{4})?\b', '', address).strip().rstrip(',')
     if no_zip != address and no_zip not in variations:
         variations.append(no_zip)
+
+    # Try inserting commas between street, city, and state if missing
+    comma_pattern = r'^\s*(.+?)\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,2})\s+(MI|Michigan|OH|Ohio|IN|Indiana)\s*$'
+    for addr in list(variations):
+        if ',' in addr:
+            continue
+        match = re.match(comma_pattern, addr, flags=re.IGNORECASE)
+        if match:
+            street, city, state = match.groups()
+            add_variation(f"{street}, {city}, {state}")
+        with_state_comma = re.sub(r'\s+(MI|Michigan|OH|Ohio|IN|Indiana)\b', r', \1', addr, flags=re.IGNORECASE)
+        if with_state_comma != addr:
+            add_variation(with_state_comma)
+
+    # Try removing punctuation
+    no_punct = re.sub(r'[.,]', '', address)
+    add_variation(no_punct)
 
     # Try removing street suffix entirely (last resort)
     no_suffix = re.sub(r'\b(St|Street|Rd|Road|Ave|Avenue|Blvd|Boulevard|Dr|Drive|Ln|Lane|Ct|Court|Pl|Place|Cir|Circle)\b\.?', '', address, flags=re.IGNORECASE)
@@ -650,7 +688,8 @@ def load_saved_model(model_path: str = None, city: str = None) -> tuple:
 def predict_price(model: CatBoostRegressor, beds: int, baths: float, sqft: int,
                   property_type: str, cluster_id: int = None,
                   lat: float = None, lon: float = None,
-                  address: str = None, metadata: dict = None) -> float:
+                  address: str = None, metadata: dict = None,
+                  extra_features: dict = None) -> float:
     """
     Make a single prediction using the loaded model.
 
@@ -675,13 +714,24 @@ def predict_price(model: CatBoostRegressor, beds: int, baths: float, sqft: int,
         cluster_id = find_nearest_cluster(lat, lon, centroids)
         print(f"Assigned to Cluster {cluster_id}")
 
-    X = pd.DataFrame([{
+    row = {
         'Beds': beds,
         'Baths': baths,
         'SqFt': sqft,
         'Property Type': property_type,
         'Cluster_ID': str(cluster_id)
-    }])
+    }
+    if extra_features:
+        row.update(extra_features)
+
+    feature_names = metadata.get('feature_names') if metadata else None
+    if feature_names:
+        missing = [name for name in feature_names if name not in row]
+        if missing:
+            raise ValueError(f"Missing features for prediction: {missing}")
+        X = pd.DataFrame([[row[name] for name in feature_names]], columns=feature_names)
+    else:
+        X = pd.DataFrame([row])
     pred = model.predict(X)[0]
     if metadata and metadata.get('target_transform') == 'log1p':
         pred = np.expm1(pred)

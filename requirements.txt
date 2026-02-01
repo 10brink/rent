@@ -5,3 +5,4 @@ requests
 flask
 catboost
 gunicorn
+python-dotenv
